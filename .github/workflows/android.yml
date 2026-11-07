@@ -1,0 +1,229 @@
+name: Android
+
+# Builds and signs an arm64 APK of EffectCraft (apps/effectcraft-android).
+#
+# Signing: put a PKCS12 keystore (one key, same store and key password) in the repository secrets
+#   ANDROID_KEYSTORE_BASE64   base64 of the .jks / .p12 file
+#   KEYSTORE_PASSWORD         its password
+# Without them the job signs with a throwaway key so the APK still installs, but updates over a
+# previous install will fail because the key differs each run.
+
+on:
+  push:
+    branches: [android-upstream]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # publishes the APK as a GitHub release
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          cache-bin: "true"
+
+      - name: Android SDK and NDK
+        run: |
+          set -eux
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0"
+          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+          echo "NDK: $ANDROID_NDK_LATEST_HOME"
+
+      - name: Install cargo-apk
+        run: |
+          set +e
+          cargo install cargo-apk --locked > "$RUNNER_TEMP/install.log" 2>&1
+          rc=$?
+          if [ $rc -ne 0 ]; then
+            msg=$(tail -n 60 "$RUNNER_TEMP/install.log" | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=cargo-apk install failed::$msg"
+            exit $rc
+          fi
+
+      - name: Keystore
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          set -eu
+          KS="$RUNNER_TEMP/release.keystore"
+          if [ -n "$KS_B64" ] && [ -n "$KS_PASS" ]; then
+            echo "$KS_B64" | base64 -d > "$KS"
+            echo "SIGNING=release key from secrets" >> "$GITHUB_ENV"
+          else
+            KS_PASS="effectcraft-ci"
+            keytool -genkeypair -keystore "$KS" -storetype PKCS12 -storepass "$KS_PASS" -keypass "$KS_PASS" \
+              -alias ci -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=EffectCraft CI,O=CI,C=US"
+            echo "SIGNING=throwaway CI key (add the secrets for a stable key)" >> "$GITHUB_ENV"
+          fi
+          echo "::add-mask::$KS_PASS"
+          echo "CARGO_APK_RELEASE_KEYSTORE=$KS" >> "$GITHUB_ENV"
+          echo "CARGO_APK_RELEASE_KEYSTORE_PASSWORD=$KS_PASS" >> "$GITHUB_ENV"
+
+      - name: Build APK
+        run: |
+          set +e
+          cargo apk build --release --lib -p effectcraft-android > "$RUNNER_TEMP/build.log" 2>&1
+          rc=$?
+          if [ $rc -ne 0 ]; then
+            # Drop the progress lines; keep the end of what is left (the annotation size is capped).
+            sel=$(grep -v -E "^ *(Compiling|Downloaded|Downloading|Fresh|Blocking|Updating|Locking|Adding) " "$RUNNER_TEMP/build.log" | tail -n 40 | cut -c1-300)
+            msg=$(printf '%s' "$sel" | tail -c 3500 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=cargo apk build failed::$msg"
+            exit $rc
+          fi
+
+      - name: Verify signature
+        run: |
+          set -eux
+          APK=$(find target -name '*.apk' -path '*release*' | head -n1)
+          echo "APK=$APK" >> "$GITHUB_ENV"
+          ls -l "$APK"
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --verbose --print-certs "$APK"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EffectCraft-android
+          path: ${{ env.APK }}
+          if-no-files-found: error
+
+      - name: Publish release (direct download link)
+        if: github.ref == 'refs/heads/android-upstream'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          cp "$APK" EffectCraft.apk
+          gh release delete android-upstream-latest --yes --cleanup-tag || true
+          gh release create android-upstream-latest EffectCraft.apk --prerelease --target "$GITHUB_SHA" \
+            --title "EffectCraft Android (latest build)" \
+            --notes "arm64 + armeabi-v7a APK. Signing: $SIGNING"
+          echo "https://github.com/$GITHUB_REPOSITORY/releases/download/android-upstream-latest/EffectCraft.apk"
+
+  # Runs the app in an Android emulator (x86_64, software Vulkan/GL) and publishes screenshots
+  # and logcat as the pre-release `android-upstream-test`, to see what a launch actually does.
+  emulator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          cache-bin: "true"
+          key: emulator
+
+      - name: Android SDK and NDK
+        run: |
+          set -eux
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0"
+          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+
+      - name: Install cargo-apk
+        run: cargo install cargo-apk --locked
+
+      - name: Throwaway keystore
+        run: |
+          set -eu
+          KS="$RUNNER_TEMP/test.keystore"
+          keytool -genkeypair -keystore "$KS" -storetype PKCS12 -storepass effectcraft-ci -keypass effectcraft-ci \
+            -alias ci -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=EffectCraft CI,O=CI,C=US"
+          echo "CARGO_APK_RELEASE_KEYSTORE=$KS" >> "$GITHUB_ENV"
+          echo "CARGO_APK_RELEASE_KEYSTORE_PASSWORD=effectcraft-ci" >> "$GITHUB_ENV"
+
+      - name: Build x86_64 APK
+        run: |
+          set +e
+          cargo apk build --release --lib -p effectcraft-android --target x86_64-linux-android > "$RUNNER_TEMP/build.log" 2>&1
+          rc=$?
+          if [ $rc -ne 0 ]; then
+            sel=$(grep -v -E "^ *(Compiling|Downloaded|Downloading|Fresh|Blocking|Updating|Locking|Adding) " "$RUNNER_TEMP/build.log" | tail -n 40 | cut -c1-300)
+            msg=$(printf '%s' "$sel" | tail -c 3500 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=x86_64 build failed::$msg"
+            exit $rc
+          fi
+          APK=$(find target -name '*.apk' -path '*release*' | head -n1)
+          echo "APK=$APK" >> "$GITHUB_ENV"
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run in the emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          arch: x86_64
+          target: google_apis
+          force-avd-creation: false
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: bash apps/effectcraft-android/ci-emulator.sh ${{ env.APK }}
+
+      - name: Report
+        if: always()
+        run: |
+          if [ -f emulator-out/logcat-filtered.txt ]; then
+            msg=$(tail -n 40 emulator-out/logcat-filtered.txt | cut -c1-260 | tail -c 3500 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::notice title=emulator logcat::$msg"
+          fi
+          if [ -f emulator-out/alive.txt ]; then
+            msg=$(cat emulator-out/device.txt emulator-out/alive.txt | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::notice title=emulator summary::$msg"
+          fi
+
+      - name: Publish test results
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -u
+          ls -l emulator-out || exit 0
+          gh release delete android-upstream-test --yes --cleanup-tag || true
+          gh release create android-upstream-test emulator-out/* --prerelease --target "$GITHUB_SHA" \
+            --title "Emulator test (x86_64, Android 11)" --notes "Screenshots and logcat from the emulator run of this build."
+

@@ -1,0 +1,49 @@
+[package]
+name = "effectcraft-android"
+description = "EffectCraft for Android (NativeActivity + wgpu/Vulkan). Built into an APK by .github/workflows/android.yml"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Not `lints.workspace = true`: the workspace forbids `unsafe_code`, and the Android entry point
+# (`#[unsafe(no_mangle)] fn android_main`) is unsafe by definition.
+[lints.rust]
+unsafe_code = "allow"
+
+[lib]
+crate-type = ["cdylib"]
+
+# Everything lives behind `cfg(target_os = "android")`, so the crate is empty on other targets and
+# a plain `cargo build` / `cargo test` of the workspace is unaffected.
+[target.'cfg(target_os = "android")'.dependencies]
+effectcraft-engine = { workspace = true }
+effectcraft-host = { workspace = true }
+effectcraft-ui-egui = { workspace = true }
+egui = { workspace = true }
+eframe = { workspace = true, features = ["default_fonts", "wgpu", "android-native-activity"] }
+android-activity = "0.6"
+android_logger = "0.15"
+serde_json = { workspace = true }
+log = { workspace = true }
+
+[package.metadata.android]
+package = "ai.storyteller.effectcraft"
+apk_name = "EffectCraft"
+build_targets = ["aarch64-linux-android", "armv7-linux-androideabi"]
+
+[package.metadata.android.sdk]
+min_sdk_version = 26
+target_sdk_version = 34
+
+[package.metadata.android.application]
+label = "EffectCraft"
+
+[package.metadata.android.application.activity]
+config_changes = "orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|screenLayout|uiMode|density"
+
+# wgpu needs Vulkan.
+[[package.metadata.android.uses_feature]]
+name = "android.hardware.vulkan.version"
+required = true
+version = 0x400003
