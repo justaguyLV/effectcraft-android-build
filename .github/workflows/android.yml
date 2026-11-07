@@ -10,7 +10,7 @@ name: Android
 
 on:
   push:
-    branches: [android-upstream]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -114,21 +114,21 @@ jobs:
           if-no-files-found: error
 
       - name: Publish release (direct download link)
-        if: github.ref == 'refs/heads/android-upstream'
+        if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -eu
           cp "$APK" EffectCraft.apk
-          gh release delete android-upstream-latest --yes --cleanup-tag || true
-          gh release create android-upstream-latest EffectCraft.apk --prerelease --target "$GITHUB_SHA" \
+          gh release delete android-latest --yes --cleanup-tag || true
+          gh release create android-latest EffectCraft.apk --prerelease --target "$GITHUB_SHA" \
             --title "EffectCraft Android (latest build)" \
             --notes "arm64 + armeabi-v7a APK. Signing: $SIGNING"
-          echo "https://github.com/$GITHUB_REPOSITORY/releases/download/android-upstream-latest/EffectCraft.apk"
+          echo "https://github.com/$GITHUB_REPOSITORY/releases/download/android-latest/EffectCraft.apk"
 
   # Runs the app in an Android emulator (x86_64, software Vulkan/GL) and publishes screenshots
-  # and logcat as the pre-release `android-upstream-test`, to see what a launch actually does.
+  # and logcat as the pre-release `android-test`, to see what a launch actually does.
   emulator:
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -223,7 +223,7 @@ jobs:
         run: |
           set -u
           ls -l emulator-out || exit 0
-          gh release delete android-upstream-test --yes --cleanup-tag || true
-          gh release create android-upstream-test emulator-out/* --prerelease --target "$GITHUB_SHA" \
+          gh release delete android-test --yes --cleanup-tag || true
+          gh release create android-test emulator-out/* --prerelease --target "$GITHUB_SHA" \
             --title "Emulator test (x86_64, Android 11)" --notes "Screenshots and logcat from the emulator run of this build."
 
