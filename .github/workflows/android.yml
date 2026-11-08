@@ -107,10 +107,24 @@ jobs:
           ls -l "$APK"
           "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --verbose --print-certs "$APK"
 
+      - name: APKShield — encrypt .so libraries
+        run: |
+          set -eux
+          pip install cryptography tqdm --quiet
+          python3 tools/apkshield.py encrypt "$APK" EffectCraft_protected.apk \
+            -k EffectCraft_key.bin --no-verify
+          python3 tools/apkshield.py verify "$APK" EffectCraft_protected.apk \
+            -k EffectCraft_key.bin
+          cp EffectCraft_protected.apk "$APK"
+          echo "APKShield: .so files encrypted with AES-256-GCM"
+
+
       - uses: actions/upload-artifact@v4
         with:
           name: EffectCraft-android
-          path: ${{ env.APK }}
+          path: |
+            ${{ env.APK }}
+            EffectCraft_key.bin
           if-no-files-found: error
 
       - name: Publish release (direct download link)
@@ -122,7 +136,7 @@ jobs:
           set -eu
           cp "$APK" EffectCraft.apk
           gh release delete android-latest --yes --cleanup-tag || true
-          gh release create android-latest EffectCraft.apk --prerelease --target "$GITHUB_SHA" \
+          gh release create android-latest EffectCraft.apk EffectCraft_key.bin --prerelease --target "$GITHUB_SHA" \
             --title "EffectCraft Android (latest build)" \
             --notes "arm64 + armeabi-v7a APK. Signing: $SIGNING"
           echo "https://github.com/$GITHUB_REPOSITORY/releases/download/android-latest/EffectCraft.apk"
@@ -226,4 +240,5 @@ jobs:
           gh release delete android-test --yes --cleanup-tag || true
           gh release create android-test emulator-out/* --prerelease --target "$GITHUB_SHA" \
             --title "Emulator test (x86_64, Android 11)" --notes "Screenshots and logcat from the emulator run of this build."
+
 
